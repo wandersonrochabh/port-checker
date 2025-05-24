@@ -1,94 +1,95 @@
 const express = require('express');
-const cors = require('cors');
-const tls = require('tls');
 const net = require('net');
-const dns = require('dns');
+const tls = require('tls');
+const cors = require('cors');
 
 const app = express();
 app.use(cors());
 
-app.get('/api/check-port', (req, res) => {
-  const host = req.query.ip;
+app.get('/api/check-port', async (req, res) => {
+  const ip = req.query.ip;
   const port = parseInt(req.query.port);
 
-  if (!host || isNaN(port)) {
-    return res.status(400).json({ success: false, message: 'IP ou porta inválida.' });
+  if (!ip || isNaN(port)) {
+    return res.status(400).json({ success: false, message: 'IP e porta são obrigatórios.' });
   }
 
-  dns.lookup(host, (err, address) => {
-    if (err) {
-      return res.json({ success: false, message: 'Erro DNS: ' + err.message });
+  const socket = new net.Socket();
+  let isPortOpen = false;
+
+  socket.setTimeout(3000);
+
+  socket.on('connect', () => {
+    isPortOpen = true;
+    socket.destroy();
+  });
+
+  socket.on('timeout', () => {
+    socket.destroy();
+  });
+
+  socket.on('error', () => {
+    socket.destroy();
+  });
+
+  socket.on('close', () => {
+    if (!isPortOpen) {
+      return res.json({ success: true, status: 'closed', message: `Porta ${port} está FECHADA em ${ip}.` });
     }
 
-    // Para HTTPS (porta 443) vamos tentar uma conexão TLS
+    // Agora testamos conexão TLS se for porta HTTPS
     if (port === 443) {
-      const socket = tls.connect(
+      const tlsSocket = tls.connect(
         {
-          host: address,
+          host: ip,
           port: port,
-          servername: host,
-          rejectUnauthorized: false, // Aceita certificado inválido, mas podemos detectar isso
-          timeout: 3000,
+          servername: ip,
+          rejectUnauthorized: false, // ⚠️ Não bloqueia certificados inválidos
+          timeout: 3000
         },
         () => {
-          const cert = socket.getPeerCertificate();
-          if (socket.authorized) {
-            res.json({
+          const cert = tlsSocket.getPeerCertificate();
+          if (cert && cert.valid_to) {
+            tlsSocket.end();
+            return res.json({
               success: true,
-              message: `Porta ${port} está ABERTA com certificado válido.`,
-              certificate: cert.subject
+              status: 'open',
+              message: `Porta ${port} está ABERTA em ${ip}. Certificado VÁLIDO até ${cert.valid_to}.`
             });
           } else {
-            res.json({
+            tlsSocket.end();
+            return res.json({
               success: true,
-              message: `Porta ${port} está ABERTA, mas o certificado é inválido.`,
-              error: socket.authorizationError
+              status: 'open_cert_invalid',
+              message: `Porta ${port} está ABERTA em ${ip}, mas o certificado é INVÁLIDO ou ausente.`
             });
           }
-          socket.end();
         }
       );
 
-      socket.on('error', (e) => {
-        res.json({ success: true, message: `Porta ${port} está ABERTA, mas erro SSL: ${e.message}` });
+      tlsSocket.on('error', (err) => {
+        return res.json({
+          success: true,
+          status: 'open_cert_invalid',
+          message: `Porta ${port} está ABERTA em ${ip}, mas o certificado apresentou erro: ${err.message}`
+        });
       });
 
-      socket.on('timeout', () => {
-        socket.destroy();
-        res.json({ success: false, message: 'Timeout na conexão TLS.' });
+      tlsSocket.setTimeout(3000, () => {
+        tlsSocket.destroy();
+        return res.json({
+          success: true,
+          status: 'open_cert_invalid',
+          message: `Porta ${port} está ABERTA em ${ip}, mas a verificação do certificado falhou por TIMEOUT.`
+        });
       });
 
     } else {
-      // Teste genérico com net.Socket para outras portas
-      const socket = new net.Socket();
-      let isOpen = false;
-
-      socket.setTimeout(3000);
-
-      socket.on('connect', () => {
-        isOpen = true;
-        socket.destroy();
-      });
-
-      socket.on('timeout', () => {
-        socket.destroy();
-      });
-
-      socket.on('error', () => {
-        socket.destroy();
-      });
-
-      socket.on('close', () => {
-        if (isOpen) {
-          res.json({ success: true, message: `Porta ${port} está ABERTA.` });
-        } else {
-          res.json({ success: true, message: `Porta ${port} está FECHADA.` });
-        }
-      });
-
-      socket.connect(port, address);
+      return res.json({ success: true, status: 'open', message: `Porta ${port} está ABERTA em ${ip}.` });
     }
   });
+
+  socket.connect(port, ip);
 });
 
 const PORT = 3000;
